@@ -109,6 +109,8 @@ def main():
                        help='Use hybrid detection: subtitles first (fast), then audio transcription for suspicious segments (maintains 99-100%% quality, 10-20x faster)')
     parser.add_argument('--include-religious', action='store_true',
                        help='Also filter religious/exclamatory terms (god, jesus, damn, hell, etc). Disabled by default.')
+    parser.add_argument('--one-file', action='store_false',
+                       help='Only creates one video file that doesn\'t have subs attatched instead of making a seperate one with subs attatched. Disabled by default.')
     
     args = parser.parse_args()
     
@@ -228,6 +230,12 @@ def main():
                 if audio_segments:
                     for start, end, word in audio_segments:
                         print(f"    - {start:.2f}s to {end:.2f}s ({end-start:.2f}s): '{word}'")
+                    try:
+                            words_removed_list = output_path.with_suffix('.wordsList.txt')
+                            with open(words_removed_list, 'a') as f:
+                                f.write(f"\n    - {start:.2f}s to {end:.2f}s ({end-start:.2f}s): '{word}'")
+                        except Exception as e:
+                            print(f"Warning: failed to write cutting-time file: {e}")
                 else:
                     print("    ✓ No profanity detected in audio")
                 print()
