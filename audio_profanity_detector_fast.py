@@ -57,27 +57,58 @@ class AudioProfanityDetectorFast:
         self._init_whisper()
     
     def _init_whisper(self):
-        """Initialize faster-whisper model"""
+        """Initialize faster-whisper on CUDA when available, otherwise CPU."""
         try:
             from faster_whisper import WhisperModel
-            
-            print(f"  Loading faster-whisper model: {self.model_size}...")
-            # Try different compute types for CPU (int8_float16 first for best speed/accuracy balance)
-            for compute_type in ['int8_float16', 'int8', 'float32']:
-                try:
-                    self.whisper_model = WhisperModel(self.model_size, device='cpu', compute_type=compute_type)
-                    print(f"  ✓ Faster-whisper model loaded (compute_type={compute_type})")
-                    break
-                except ValueError:
-                    continue
-            
-            if self.whisper_model is None:
-                raise RuntimeError("Could not initialize faster-whisper with any compute type")
-                
         except ImportError:
             raise ImportError(
                 "faster-whisper not installed. Install with: pip install faster-whisper"
             )
+
+        print(f"  Loading faster-whisper model: {self.model_size}...")
+        last_error = None
+
+        for device, compute_types in self._device_candidates():
+            for compute_type in compute_types:
+                try:
+                    self.whisper_model = WhisperModel(
+                        self.model_size,
+                        device=device,
+                        compute_type=compute_type,
+                    )
+                    print(
+                        f"  ✓ Faster-whisper model loaded "
+                        f"(device={device}, compute_type={compute_type})"
+                    )
+                    return
+                except Exception as e:
+                    last_error = e
+                    # CUDA DLL/driver mismatches should fall back quickly to CPU.
+                    if device == 'cuda':
+                        print(
+                            f"  ⚠ GPU unavailable ({e}). "
+                            "Falling back to CPU..."
+                        )
+                        break
+
+        raise RuntimeError(
+            f"Could not initialize faster-whisper on CUDA or CPU. Last error: {last_error}"
+        )
+
+    def _device_candidates(self):
+        """Prefer CUDA when usable; always include CPU fallback."""
+        candidates = []
+        try:
+            import ctranslate2
+            if ctranslate2.get_cuda_device_count() > 0:
+                candidates.append(('cuda', ['float16', 'int8_float16', 'int8', 'float32']))
+            else:
+                print("  ℹ No CUDA GPU detected. Using CPU.")
+        except Exception as e:
+            print(f"  ⚠ GPU check failed ({e}). Using CPU.")
+
+        candidates.append(('cpu', ['int8_float16', 'int8', 'float32']))
+        return candidates
     
     def detect(self, video_path: Path) -> List[Tuple[float, float, str]]:
         """

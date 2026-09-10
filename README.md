@@ -82,6 +82,8 @@ Want to see how it works before installing? **Try the app instantly in your brow
 - **FFmpeg** (free video processing tool)
 - **5-10 minutes** for setup (one-time only)
 
+**Default install is CPU-only.** CUDA / cuDNN are **not required** for normal use.
+
 ### Quick Setup (Copy & Paste)
 
 ```bash
@@ -238,9 +240,9 @@ Unlike VidAngel and ClearPlay that only work with specific streaming services, t
 - **Disk I/O**: Heavy read/write operations during video processing
 - **Processing Time**: 3-6 hours for a 2-hour movie on CPU (base model with dialog enhancement)
 
-**⚡ GPU Strongly Recommended**: If you have an NVIDIA GPU, this tool can leverage CUDA acceleration for **10-20x faster processing** with significantly lower CPU load. Without a GPU, expect very long processing times.
+**⚡ Optional GPU speedup**: An NVIDIA GPU can make transcription much faster, but it is **not required**. The default path runs on CPU.
 
-**💡 Best Practice**: Run this tool overnight or when you don't need your computer. Close unnecessary applications before processing. Consider GPU rental services (AWS, Google Cloud) for batch processing.
+**💡 Best Practice**: On CPU-only machines, run overnight or when you don't need your computer. Using existing subtitle files (`--subs`) is the fastest way to skip long transcription.
 
 ### Minimum Specs (Budget PCs)
 - **CPU**: Quad-core processor (Intel i5, AMD Ryzen 5, or better)
@@ -248,21 +250,32 @@ Unlike VidAngel and ClearPlay that only work with specific streaming services, t
 - **Storage**: 5GB free space + 2x video file size
 - **OS**: Windows 10/11, macOS 10.15+, or Linux
 - **Processing Time**: 2-hour movie takes ~6 hours on CPU
-- **⚠️ Warning**: Expect very long processing times without GPU
+- **CUDA/cuDNN**: Not required
 
 ### Recommended Specs (Production Use)
 - **CPU**: Multi-core processor (Intel i7/i9, AMD Ryzen 7/9)
 - **RAM**: 16GB or more
-- **GPU**: NVIDIA GPU with CUDA support (GTX 1060 or better)
+- **GPU (optional)**: NVIDIA GPU with CUDA 12 support (GTX 1060 or better)
 - **Storage**: 10GB+ free space
-- **Processing Time**: 2-hour movie takes ~20-40 minutes with GPU
+- **Processing Time**: ~20-40 minutes with GPU, much longer on CPU
 
-### GPU Acceleration (Highly Recommended)
-With NVIDIA GPU and CUDA:
-- **Processing Time**: 2-hour movie in ~5-10 minutes
-- **CPU Load**: Significantly reduced (30-40% vs 100%)
-- **System Usability**: Computer remains responsive during processing
-- **Cost**: Free to use, but requires compatible hardware
+### Optional GPU Acceleration (Windows / NVIDIA)
+
+CUDA 12 and cuDNN 9 are **optional**. Use them only if you want NVIDIA GPU acceleration on Windows.
+
+1. Install a recent **NVIDIA Game Ready / Studio driver**
+2. Install **CUDA Toolkit 12.x** from NVIDIA
+3. Install **cuDNN 9** matching your CUDA 12.x version
+4. Reinstall/upgrade the CUDA-enabled CTranslate2 / faster-whisper stack in your venv:
+   ```bash
+   pip install -U faster-whisper
+   ```
+5. Verify GPU visibility:
+   ```bash
+   nvidia-smi
+   ```
+
+If CUDA/cuDNN are missing or mismatched, the tool automatically falls back to CPU with a clear warning instead of crashing.
 
 **Note**: Unlike streaming-based filters (VidAngel, ClearPlay), this tool processes videos locally, so processing time varies by system specs. You only process once, then enjoy unlimited viewing!
 
@@ -679,10 +692,17 @@ Install FFmpeg:
 
 ### Slow transcription (6+ hours for movies)
 - **Expected**: Base model with dialog enhancement takes 3-6 hours per 2-hour movie on CPU
-- **GPU acceleration**: Install CUDA-enabled PyTorch for 10-20x speedup
+- **Optional GPU acceleration**: On Windows NVIDIA systems, install CUDA Toolkit 12.x + cuDNN 9 (see Optional GPU section above). This app uses faster-whisper/CTranslate2, not PyTorch.
 - **Cloud rental**: Use AWS/Google Cloud GPU instances for batch processing
 - **Alternative**: Use `--subs` with existing subtitle files (skips transcription, 20x faster)
-- **Not recommended**: `--model tiny` is much faster but misses profanity on complex audio
+- **Not recommended**: `--model tiny` is much faster but may miss profanity on complex audio
+
+### CUDA / cuDNN errors on Windows
+- CUDA/cuDNN are optional. If you see CUDA DLL errors, either:
+  1. Install matching CUDA 12.x + cuDNN 9, or
+  2. Continue on CPU (default path works without GPU libraries)
+- Confirm GPU status with `nvidia-smi`
+- Re-run the tool; it should fall back to CPU automatically when GPU init fails
 
 ### Detection seems incomplete
 - Check transcript: `--dump-transcript words.txt` to see what was transcribed
