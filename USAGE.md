@@ -16,10 +16,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 ### Step 3: Install Dependencies
 ```bash
-# Install PyTorch (CPU-only, recommended)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-
-# Install other dependencies
+# Install dependencies (CPU works by default; CUDA/cuDNN are optional)
 pip install -r requirements.txt
 ```
 
