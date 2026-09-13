@@ -11,9 +11,10 @@ Or manually:
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
+
+CUDA/cuDNN are optional (NVIDIA GPU acceleration only). Default install is CPU.
 
 ## Usage
 
