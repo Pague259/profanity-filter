@@ -125,7 +125,10 @@ class VideoCutter:
             return True
 
         # Portable across modern FFmpeg: avoid non-portable -filter_script:a.
-        audio_filter = f"volume=0:enable='{enable_expr}'"
+        if len(segments_to_mute) <= 80:
+            audio_filter = f"volume=0:enable='{enable_expr}'"
+        else:
+            audio_filter = f"[0:a:0]volume=0:enable='{enable_expr}'[aout]"   
         audio_encode_args = self._build_mute_audio_encode_args(
             audio_info, output_path.suffix.lower()
         )
@@ -146,7 +149,7 @@ class VideoCutter:
         )
 
         try:
-            if len(audio_filter) <= 6000:
+            if len(segments_to_mute) <= 80:
                 cmd = [
                     'ffmpeg', '-i', str(input_path),
                     '-map', '0:v:0?',
@@ -207,65 +210,67 @@ class VideoCutter:
         audio_encode_args: List[str],
     ) -> bool:
         """Mute using filter_complex_script for very long mute expressions."""
-        filter_script_path = None
-        try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.fffilter', delete=False) as script_file:
-                script_file.write(f"[0:a:0]{audio_filter}[aout]\n")
-                filter_script_path = script_file.name
+        #need to fix this so it chops the filter_complex into 50-99 character bytes instead of reading a file also segments to mute being 99 helps
 
-            cmd = [
-                'ffmpeg', '-i', str(input_path),
-                '-filter_complex_script', filter_script_path,
-                '-map', '0:v:0?',
-                '-map', '[aout]',
-                '-map', '0:s?',
-                '-c:v', 'copy',
-                '-c:s', 'copy',
-                *audio_encode_args,
-                *self._mute_container_args(output_path),
-                '-loglevel', 'error',
-                '-y', str(output_path)
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                print("  ✓ Audio muting complete")
-                return True
 
-            cmd_no_subs = [
-                'ffmpeg', '-i', str(input_path),
-                '-filter_complex_script', filter_script_path,
-                '-map', '0:v:0?',
-                '-map', '[aout]',
-                '-c:v', 'copy',
-                *audio_encode_args,
-                *self._mute_container_args(output_path),
-                '-loglevel', 'error',
-                '-y', str(output_path)
-            ]
-            result = subprocess.run(cmd_no_subs, capture_output=True, text=True)
-            if result.returncode == 0:
-                print("  ✓ Audio muting complete (subtitle streams not copied)")
-                return True
 
-            print("  ✗ FFmpeg mute command failed. Return code:", result.returncode)
-            if result.stderr:
-                err_lines = [l for l in result.stderr.splitlines() if l.strip()]
-                print("    " + '\n    '.join(err_lines[:12]))
-            return False
-        finally:
-            if filter_script_path and os.path.exists(filter_script_path):
-                try:
-                    os.remove(filter_script_path)
-                except OSError:
-                    pass
+        cmd = [
+            'ffmpeg', '-i', str(input_path),
+            '-filter_complex', audio_filter, #TODO: change maybe
+            '-map', '0:v:0?',
+            '-map', '[aout]',
+            '-map', '0:s?',
+            '-c:v', 'copy',
+            '-c:s', 'copy',
+            *audio_encode_args,
+            *self._mute_container_args(output_path),
+            '-loglevel', 'error',
+            '-y', str(output_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            print("  ✓ Audio muting complete")
+            return True
+
+        cmd_no_subs = [
+            'ffmpeg', '-i', str(input_path),
+            '-filter_complex', audio_filter, #TODO: change maybe
+            '-map', '0:v:0?',
+            '-map', '[aout]',
+            '-c:v', 'copy',
+            *audio_encode_args,
+            *self._mute_container_args(output_path),
+            '-loglevel', 'error',
+            '-y', str(output_path)
+        ]
+        result = subprocess.run(cmd_no_subs, capture_output=True, text=True)
+        if result.returncode == 0:
+            print("  ✓ Audio muting complete (subtitle streams not copied)")
+            return True
+
+        print("  ✗ FFmpeg mute command failed. Return code:", result.returncode)
+        if result.stderr:
+            err_lines = [l for l in result.stderr.splitlines() if l.strip()]
+            print("    " + '\n    '.join(err_lines[:12]))
+        return False
 
     def _build_mute_enable_expr(self, segments: List[Tuple[float, float]]) -> str:
         """Build a compact enable expression for volume mute intervals."""
         parts = []
+        counter = 0
         for start, end in segments:
             if end <= start:
                 continue
-            parts.append(f"between(t,{start:.3f},{end:.3f})")
+            if counter == 80: #logic so it concats seperate mute statements for larger segments
+                parts[len(parts)-1] = (parts[len(parts)-1]+"\',volume=0:enable=\'"+f"between(t,{start:.3f},{end:.3f})")
+                counter = 0
+            else:
+                parts.append(f"between(t,{start:.3f},{end:.3f})")
+                counter += 1
+
+        
+            
+        # parts.append()
         return "+".join(parts)
 
     def _mute_container_args(self, output_path: Path) -> List[str]:
