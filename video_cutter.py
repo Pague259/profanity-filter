@@ -216,7 +216,7 @@ class VideoCutter:
 
         cmd = [
             'ffmpeg', '-i', str(input_path),
-            '-filter_complex', audio_filter, #TODO: change maybe
+            '-filter_complex', audio_filter,
             '-map', '0:v:0?',
             '-map', '[aout]',
             '-map', '0:s?',
@@ -234,7 +234,7 @@ class VideoCutter:
 
         cmd_no_subs = [
             'ffmpeg', '-i', str(input_path),
-            '-filter_complex', audio_filter, #TODO: change maybe
+            '-filter_complex', audio_filter,
             '-map', '0:v:0?',
             '-map', '[aout]',
             '-c:v', 'copy',
