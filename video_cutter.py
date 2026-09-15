@@ -107,6 +107,10 @@ class VideoCutter:
         original_bitrate = self._get_video_bitrate(input_path)
         return self._apply_cuts(input_path, output_path, keep_segments, original_bitrate)
 
+    # Keep each mute pass well under Windows command-length limits.
+    # ~200 intervals ≈ a few KB of filter text; safe for subprocess/PowerShell.
+    _MUTE_CHUNK_SIZE = 200
+
     def _mute_segments(self, input_path: Path, output_path: Path,
                        segments_to_mute: List[Tuple[float, float]]) -> bool:
         """Mute audio only in the provided time intervals while preserving video duration."""
@@ -117,15 +121,13 @@ class VideoCutter:
             return True
 
         audio_info = self._get_audio_stream_info(input_path)
-        enable_expr = self._build_mute_enable_expr(segments_to_mute)
-        if not enable_expr:
+        valid_segments = [(s, e) for s, e in segments_to_mute if e > s]
+        if not valid_segments:
             print("  No valid mute intervals - copying video as-is")
             import shutil
             shutil.copy2(input_path, output_path)
             return True
 
-        # Portable across modern FFmpeg: avoid non-portable -filter_script:a.
-        audio_filter = f"volume=0:enable='{enable_expr}'"
         audio_encode_args = self._build_mute_audio_encode_args(
             audio_info, output_path.suffix.lower()
         )
@@ -139,88 +141,53 @@ class VideoCutter:
             f"layout={layout}, "
             f"bitrate={bitrate // 1000 if isinstance(bitrate, int) else 'unknown'}k"
         )
-        print(
-            "  Mute encode: "
-            f"{' '.join(audio_encode_args[:2])} "
-            "(keeps video copy + subtitle streams; timeline unchanged)"
-        )
 
-        try:
-            if len(audio_filter) <= 6000:
-                cmd = [
-                    'ffmpeg', '-i', str(input_path),
-                    '-map', '0:v:0?',
-                    '-map', '0:a:0?',
-                    # Keep embedded subs. Dropping them forces players onto an
-                    # external SRT and often looks like a mute-mode "desync".
-                    '-map', '0:s?',
-                    '-c:v', 'copy',
-                    '-c:s', 'copy',
-                    '-af', audio_filter,
-                    *audio_encode_args,
-                    *self._mute_container_args(output_path),
-                    '-loglevel', 'error',
-                    '-y', str(output_path)
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    print("  ✓ Audio muting complete")
-                    return True
-                # Retry without subtitle mapping if the source has no/ incompatible subs.
-                print("  ⚠ Mute with subtitle copy failed; retrying without subtitle streams...")
-                cmd_no_subs = [
-                    'ffmpeg', '-i', str(input_path),
-                    '-map', '0:v:0?',
-                    '-map', '0:a:0?',
-                    '-c:v', 'copy',
-                    '-af', audio_filter,
-                    *audio_encode_args,
-                    *self._mute_container_args(output_path),
-                    '-loglevel', 'error',
-                    '-y', str(output_path)
-                ]
-                result = subprocess.run(cmd_no_subs, capture_output=True, text=True)
-                if result.returncode == 0:
-                    print("  ✓ Audio muting complete (subtitle streams not copied)")
-                    return True
-                print("  ✗ FFmpeg mute command failed. Return code:", result.returncode)
-                if result.stderr:
-                    err_lines = [l for l in result.stderr.splitlines() if l.strip()]
-                    print("    " + '\n    '.join(err_lines[:12]))
-                return False
-
-            return self._mute_segments_via_filter_script(
+        # Small lists: one portable -af pass on the full file (fast path).
+        if len(valid_segments) <= self._MUTE_CHUNK_SIZE:
+            enable_expr = self._build_mute_enable_expr(valid_segments)
+            audio_filter = f"volume=0:enable='{enable_expr}'"
+            print(
+                "  Mute encode: single-pass -af "
+                f"({len(valid_segments)} interval(s); video copy; timeline unchanged)"
+            )
+            return self._mute_single_pass(
                 input_path=input_path,
                 output_path=output_path,
                 audio_filter=audio_filter,
                 audio_encode_args=audio_encode_args,
             )
-        except Exception as e:
-            print(f"  Error during mute-only processing: {e}")
-            return False
 
-    def _mute_segments_via_filter_script(
+        # Large lists: extract audio once, mute in chunked audio-only passes,
+        # then mux muted audio back. Avoids huge CLI filters and MKV filter issues.
+        print(
+            f"  Mute encode: chunked audio-only passes "
+            f"({len(valid_segments)} intervals, chunk size {self._MUTE_CHUNK_SIZE})"
+        )
+        return self._mute_segments_chunked_audio(
+            input_path=input_path,
+            output_path=output_path,
+            segments_to_mute=valid_segments,
+            audio_info=audio_info,
+            audio_encode_args=audio_encode_args,
+        )
+
+    def _mute_single_pass(
         self,
         input_path: Path,
         output_path: Path,
         audio_filter: str,
         audio_encode_args: List[str],
     ) -> bool:
-        """Mute using filter_complex_script for very long mute expressions."""
-        filter_script_path = None
+        """Mute with one portable -af pass while copying video/subtitle streams."""
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.fffilter', delete=False) as script_file:
-                script_file.write(f"[0:a:0]{audio_filter}[aout]\n")
-                filter_script_path = script_file.name
-
             cmd = [
                 'ffmpeg', '-i', str(input_path),
-                '-filter_complex_script', filter_script_path,
                 '-map', '0:v:0?',
-                '-map', '[aout]',
+                '-map', '0:a:0?',
                 '-map', '0:s?',
                 '-c:v', 'copy',
                 '-c:s', 'copy',
+                '-af', audio_filter,
                 *audio_encode_args,
                 *self._mute_container_args(output_path),
                 '-loglevel', 'error',
@@ -231,12 +198,13 @@ class VideoCutter:
                 print("  ✓ Audio muting complete")
                 return True
 
+            print("  ⚠ Mute with subtitle copy failed; retrying without subtitle streams...")
             cmd_no_subs = [
                 'ffmpeg', '-i', str(input_path),
-                '-filter_complex_script', filter_script_path,
                 '-map', '0:v:0?',
-                '-map', '[aout]',
+                '-map', '0:a:0?',
                 '-c:v', 'copy',
+                '-af', audio_filter,
                 *audio_encode_args,
                 *self._mute_container_args(output_path),
                 '-loglevel', 'error',
@@ -252,12 +220,159 @@ class VideoCutter:
                 err_lines = [l for l in result.stderr.splitlines() if l.strip()]
                 print("    " + '\n    '.join(err_lines[:12]))
             return False
+        except Exception as e:
+            print(f"  Error during mute-only processing: {e}")
+            return False
+
+    def _mute_segments_chunked_audio(
+        self,
+        input_path: Path,
+        output_path: Path,
+        segments_to_mute: List[Tuple[float, float]],
+        audio_info: Dict[str, Optional[object]],
+        audio_encode_args: List[str],
+    ) -> bool:
+        """
+        Large mute lists:
+        1) extract primary audio once to a temp WAV
+        2) apply mute filters in chunked audio-only passes
+        3) mux muted audio onto original video (video stream copied)
+        Temp files stay in the system temp directory, never the output folder.
+        """
+        import shutil
+
+        temp_dir = Path(tempfile.mkdtemp(prefix='profanity_mute_'))
+        try:
+            extracted = temp_dir / 'source_audio.wav'
+            if not self._extract_primary_audio_wav(input_path, extracted, audio_info):
+                return False
+
+            chunks = [
+                segments_to_mute[i:i + self._MUTE_CHUNK_SIZE]
+                for i in range(0, len(segments_to_mute), self._MUTE_CHUNK_SIZE)
+            ]
+            current_audio = extracted
+            for idx, chunk in enumerate(chunks, 1):
+                enable_expr = self._build_mute_enable_expr(chunk)
+                audio_filter = f"volume=0:enable='{enable_expr}'"
+                next_audio = temp_dir / f'muted_pass_{idx:03d}.wav'
+                print(
+                    f"  Mute pass {idx}/{len(chunks)}: "
+                    f"{len(chunk)} interval(s) on audio-only track..."
+                )
+                cmd = [
+                    'ffmpeg', '-i', str(current_audio),
+                    '-af', audio_filter,
+                    '-c:a', 'pcm_s16le',
+                    '-loglevel', 'error',
+                    '-y', str(next_audio)
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"  ✗ Audio mute pass {idx} failed. Return code:", result.returncode)
+                    if result.stderr:
+                        err_lines = [l for l in result.stderr.splitlines() if l.strip()]
+                        print("    " + '\n    '.join(err_lines[:12]))
+                    return False
+                current_audio = next_audio
+
+            print("  Combining muted audio with original video...")
+            return self._mux_muted_audio(
+                input_path=input_path,
+                muted_audio_path=current_audio,
+                output_path=output_path,
+                audio_encode_args=audio_encode_args,
+            )
+        except Exception as e:
+            print(f"  Error during chunked mute-only processing: {e}")
+            return False
         finally:
-            if filter_script_path and os.path.exists(filter_script_path):
-                try:
-                    os.remove(filter_script_path)
-                except OSError:
-                    pass
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _extract_primary_audio_wav(
+        self,
+        input_path: Path,
+        output_wav: Path,
+        audio_info: Dict[str, Optional[object]],
+    ) -> bool:
+        """Extract primary audio to PCM WAV for lossless multi-pass muting."""
+        cmd = [
+            'ffmpeg', '-i', str(input_path),
+            '-map', '0:a:0',
+            '-vn',
+            '-c:a', 'pcm_s16le',
+        ]
+        channels = audio_info.get('channels')
+        if isinstance(channels, int) and channels > 0:
+            cmd.extend(['-ac', str(channels)])
+        sample_rate = audio_info.get('sample_rate')
+        if isinstance(sample_rate, int) and sample_rate > 0:
+            cmd.extend(['-ar', str(sample_rate)])
+        cmd.extend(['-loglevel', 'error', '-y', str(output_wav)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print("  ✗ Failed to extract audio for chunked mute. Return code:", result.returncode)
+            if result.stderr:
+                err_lines = [l for l in result.stderr.splitlines() if l.strip()]
+                print("    " + '\n    '.join(err_lines[:12]))
+            return False
+        print("  ✓ Primary audio extracted for chunked mute processing")
+        return True
+
+    def _mux_muted_audio(
+        self,
+        input_path: Path,
+        muted_audio_path: Path,
+        output_path: Path,
+        audio_encode_args: List[str],
+    ) -> bool:
+        """Replace primary audio with muted track; keep original video timeline."""
+        cmd = [
+            'ffmpeg',
+            '-i', str(input_path),
+            '-i', str(muted_audio_path),
+            '-map', '0:v:0?',
+            '-map', '1:a:0',
+            '-map', '0:s?',
+            '-c:v', 'copy',
+            '-c:s', 'copy',
+            *audio_encode_args,
+            *self._mute_container_args(output_path),
+            '-loglevel', 'error',
+            '-y', str(output_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            print("  ✓ Audio muting complete")
+            return True
+
+        print("  ⚠ Mux with subtitle copy failed; retrying without subtitle streams...")
+        cmd_no_subs = [
+            'ffmpeg',
+            '-i', str(input_path),
+            '-i', str(muted_audio_path),
+            '-map', '0:v:0?',
+            '-map', '1:a:0',
+            '-c:v', 'copy',
+            *audio_encode_args,
+            *self._mute_container_args(output_path),
+            '-loglevel', 'error',
+            '-y', str(output_path)
+        ]
+        result = subprocess.run(cmd_no_subs, capture_output=True, text=True)
+        if result.returncode == 0:
+            print("  ✓ Audio muting complete (subtitle streams not copied)")
+            return True
+
+        print("  ✗ Failed to mux muted audio. Return code:", result.returncode)
+        if result.stderr:
+            err_lines = [l for l in result.stderr.splitlines() if l.strip()]
+            print("    " + '\n    '.join(err_lines[:12]))
+        return False
 
     def _build_mute_enable_expr(self, segments: List[Tuple[float, float]]) -> str:
         """Build a compact enable expression for volume mute intervals."""
